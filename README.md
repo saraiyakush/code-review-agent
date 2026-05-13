@@ -18,6 +18,16 @@ Appends structured events to an append-only central log file
 ## Reporter Script
 Reads metrics log, compares against baseline, posts summary
 
+# Project Structure
+
+```
+src/
+├── baseline.js           ✅ Implemented
+├── code-review-agent.js  ⚠️  In Progress
+├── metrics-logger.js     ✅ Implemented
+└── reporter.js           ❌ Not implemented
+```
+
 # Event Flow
 ```markdown
 PR Opened

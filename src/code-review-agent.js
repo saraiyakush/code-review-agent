@@ -1,0 +1,177 @@
+const Anthropic = require("@anthropic-ai/sdk");
+const https = require("https");
+const { log } = require("./metrics-logger");
+
+// --- Config ---
+const CONFIG = {
+    owner: "frappe",
+    repo: "erpnext",
+    model: "claude-sonnet-4-6",
+    token: process.env.GITHUB_TOKEN,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY  // picked up automatically from env
+};
+
+const anthropic = new Anthropic();
+
+// --- GitHub API ---
+function get(url) {
+    return new Promise((resolve, reject) => {
+        const options = {
+            headers: {
+                "User-Agent": "code-review-agent",
+                Accept: "application/vnd.github+json",
+                ...(CONFIG.token && { Authorization: `Bearer ${CONFIG.token}` }),
+            },
+        };
+        https.get(url, options, (res) => {
+            let data = "";
+            res.on("data", (chunk) => (data += chunk));
+            res.on("end", () => {
+                if (res.statusCode === 403) {
+                    reject(new Error("Rate limit hit. Set GITHUB_TOKEN to increase limit."));
+                    return;
+                }
+                resolve(JSON.parse(data));
+            });
+            res.on("error", reject);
+        });
+    });
+}
+
+async function fetchPRDiff(prNumber) {
+    return new Promise((resolve, reject) => {
+        const options = {
+            headers: {
+                "User-Agent": "code-review-agent",
+                Accept: "application/vnd.github.diff",
+                ...(CONFIG.token && { Authorization: `Bearer ${CONFIG.token}` }),
+            },
+        };
+        const url = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/pulls/${prNumber}`;
+        https.get(url, options, (res) => {
+            let data = "";
+            res.on("data", (chunk) => (data += chunk));
+            res.on("end", () => resolve(data));
+            res.on("error", reject);
+        });
+    });
+}
+
+async function fetchPRMeta(prNumber) {
+    const url = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/pulls/${prNumber}`;
+    return get(url);
+}
+
+// --- Review Rules ---
+const REVIEW_PROMPT = `You are a senior code reviewer. Review the following PR diff and provide concise, actionable feedback.
+
+Focus on:
+- Bugs or logic errors
+- Security issues
+- Missing error handling
+- Performance concerns
+- Code clarity
+
+Format your response as a JSON object with this structure:
+{
+  "summary": "One sentence overall assessment",
+  "comments": [
+    {
+      "severity": "critical | warning | suggestion",
+      "file": "filename or 'general'",
+      "issue": "What the problem is",
+      "suggestion": "How to fix it"
+    }
+  ]
+}
+
+Return only valid JSON, no markdown fences.`;
+
+// --- Core ---
+async function reviewPR(prNumber) {
+    console.log(`\nReviewing PR #${prNumber}...`);
+    const startedAt = new Date().toISOString();
+    const startMs = Date.now();
+
+    const [meta, diff] = await Promise.all([
+        fetchPRMeta(prNumber),
+        fetchPRDiff(prNumber),
+    ]);
+
+    if (!diff || diff.length < 10) {
+        console.log("No diff available.");
+        return;
+    }
+
+    // Truncate large diffs to stay within token limits
+    const truncatedDiff = diff.length > 12000 ? diff.slice(0, 12000) + "\n...[truncated]" : diff;
+
+    const message = await anthropic.messages.create({
+        model: CONFIG.model,
+        max_tokens: 1024,
+        messages: [
+            {
+                role: "user",
+                content: `${REVIEW_PROMPT}\n\nPR Title: ${meta.title}\n\nDiff:\n${truncatedDiff}`,
+            },
+        ],
+    });
+
+    const responseText = message.content.find((b) => b.type === "text")?.text || "";
+    let review;
+
+    try {
+        review = JSON.parse(responseText);
+    } catch {
+        console.error("Failed to parse review response:", responseText);
+        return;
+    }
+
+    const timeToReviewSeconds = Math.round((Date.now() - startMs) / 1000);
+
+    // --- Log metrics event ---
+    log("code-review", "pr_reviewed", {
+        pr_id: String(prNumber),
+        pr_title: meta.title,
+        author: meta.user?.login,
+        created_at: meta.created_at,
+        reviewed_at: new Date().toISOString(),
+        time_to_review_seconds: timeToReviewSeconds,
+        comments_posted: review.comments?.length || 0,
+        review_state: review.comments?.some((c) => c.severity === "critical")
+            ? "changes_requested"
+            : "approved",
+    });
+
+    // --- Output ---
+    console.log(`\n── PR #${prNumber}: ${meta.title}`);
+    console.log(`Summary: ${review.summary}`);
+    console.log(`\nComments (${review.comments?.length || 0}):`);
+
+    for (const comment of review.comments || []) {
+        const icon = comment.severity === "critical" ? "🔴" : comment.severity === "warning" ? "🟡" : "🔵";
+        console.log(`\n${icon} [${comment.severity.toUpperCase()}] ${comment.file}`);
+        console.log(`   Issue: ${comment.issue}`);
+        console.log(`   Fix:   ${comment.suggestion}`);
+    }
+
+    console.log(`\nReview completed in ${timeToReviewSeconds}s`);
+    return review;
+}
+
+// --- Main ---
+async function run() {
+    const prNumber = process.argv[2];
+
+    if (!prNumber) {
+        console.error("Usage: node code-review-agent.js <PR_NUMBER>");
+        process.exit(1);
+    }
+
+    await reviewPR(parseInt(prNumber));
+}
+
+run().catch((err) => {
+    console.error("Error:", err.message);
+    process.exit(1);
+});
