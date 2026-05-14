@@ -3,8 +3,8 @@ const fs = require("fs");
 
 // --- Config ---
 const CONFIG = {
-    owner: "frappe",
-    repo: "erpnext",
+    owner: "saraiyakush",
+    repo: "code-review-agent",
     lookbackDays: 1,
     maxPages: 5,
     outputFile: "baseline.json",

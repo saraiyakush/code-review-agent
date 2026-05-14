@@ -4,8 +4,8 @@ const { log } = require("./metrics-logger");
 
 // --- Config ---
 const CONFIG = {
-    owner: "frappe",
-    repo: "erpnext",
+    owner: "saraiyakush",
+    repo: "code-review-agent",
     model: "claude-sonnet-4-6",
     token: process.env.GITHUB_TOKEN,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY  // picked up automatically from env
@@ -176,7 +176,9 @@ async function reviewPR(prNumber) {
     let review;
 
     try {
-        review = JSON.parse(responseText);
+        // Strip markdown code fences if present
+        const cleanedText = responseText.replace(/^```json\s*\n?/i, "").replace(/\n?```\s*$/i, "");
+        review = JSON.parse(cleanedText);
     } catch {
         console.error("Failed to parse review response:", responseText);
         return;
