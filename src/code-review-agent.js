@@ -4,11 +4,12 @@ const { log } = require("./metrics-logger");
 
 // --- Config ---
 const CONFIG = {
-    owner: "saraiyakush",
-    repo: "code-review-agent",
-    model: "claude-sonnet-4-6",
+    owner: process.env.GITHUB_OWNER,
+    repo: process.env.GITHUB_REPO,
+    model: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
     token: process.env.GITHUB_TOKEN,
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY  // picked up automatically from env
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    maxDiffSize: parseInt(process.env.MAX_DIFF_SIZE || "12000")
 };
 
 const anthropic = new Anthropic();
@@ -148,82 +149,114 @@ async function reviewPR(prNumber) {
     const startedAt = new Date().toISOString();
     const startMs = Date.now();
 
-    const [meta, diff] = await Promise.all([
-        fetchPRMeta(prNumber),
-        fetchPRDiff(prNumber),
-    ]);
-
-    if (!diff || diff.length < 10) {
-        console.log("No diff available.");
-        return;
-    }
-
-    // Truncate large diffs to stay within token limits
-    const truncatedDiff = diff.length > 12000 ? diff.slice(0, 12000) + "\n...[truncated]" : diff;
-
-    const message = await anthropic.messages.create({
-        model: CONFIG.model,
-        max_tokens: 1024,
-        messages: [
-            {
-                role: "user",
-                content: `${REVIEW_PROMPT}\n\nPR Title: ${meta.title}\n\nDiff:\n${truncatedDiff}`,
-            },
-        ],
-    });
-
-    const responseText = message.content.find((b) => b.type === "text")?.text || "";
-    let review;
-
     try {
-        // Strip markdown code fences if present
-        const cleanedText = responseText.replace(/^```json\s*\n?/i, "").replace(/\n?```\s*$/i, "");
-        review = JSON.parse(cleanedText);
-    } catch {
-        console.error("Failed to parse review response:", responseText);
-        return;
-    }
+        const [meta, diff] = await Promise.all([
+            fetchPRMeta(prNumber),
+            fetchPRDiff(prNumber),
+        ]);
 
-    const timeToReviewSeconds = Math.round((Date.now() - startMs) / 1000);
+        if (!diff || diff.length < 10) {
+            console.log("No diff available.");
+            return {
+                success: false,
+                pr_number: prNumber,
+                error: "No diff available",
+            };
+        }
 
-    // --- Log metrics event ---
-    log("code-review", "pr_reviewed", {
-        pr_id: String(prNumber),
-        pr_title: meta.title,
-        author: meta.user?.login,
-        created_at: meta.created_at,
-        reviewed_at: new Date().toISOString(),
-        time_to_review_seconds: timeToReviewSeconds,
-        comments_posted: review.comments?.length || 0,
-        review_state: review.comments?.some((c) => c.severity === "critical")
-            ? "changes_requested"
-            : "approved",
-    });
+        // Truncate large diffs to stay within token limits
+        const truncatedDiff = diff.length > CONFIG.maxDiffSize ? diff.slice(0, CONFIG.maxDiffSize) + "\n...[truncated]" : diff;
 
-    // --- Output ---
-    console.log(`\n── PR #${prNumber}: ${meta.title}`);
-    console.log(`Summary: ${review.summary}`);
-    console.log(`\nComments (${review.comments?.length || 0}):`);
+        const message = await anthropic.messages.create({
+            model: CONFIG.model,
+            max_tokens: 1024,
+            messages: [
+                {
+                    role: "user",
+                    content: `${REVIEW_PROMPT}\n\nPR Title: ${meta.title}\n\nDiff:\n${truncatedDiff}`,
+                },
+            ],
+        });
 
-    for (const comment of review.comments || []) {
-        const icon = comment.severity === "critical" ? "🔴" : comment.severity === "warning" ? "🟡" : "🔵";
-        console.log(`\n${icon} [${comment.severity.toUpperCase()}] ${comment.file}`);
-        console.log(`   Issue: ${comment.issue}`);
-        console.log(`   Fix:   ${comment.suggestion}`);
-    }
+        const responseText = message.content.find((b) => b.type === "text")?.text || "";
+        let review;
 
-    console.log(`\nReview completed in ${timeToReviewSeconds}s`);
+        try {
+            // Strip markdown code fences if present
+            const cleanedText = responseText.replace(/^```json\s*\n?/i, "").replace(/\n?```\s*$/i, "");
+            review = JSON.parse(cleanedText);
+        } catch {
+            console.error("Failed to parse review response:", responseText);
+            return {
+                success: false,
+                pr_number: prNumber,
+                error: "Failed to parse LLM response",
+                raw_response: responseText,
+            };
+        }
 
-    // --- Post to GitHub ---
-    try {
-        const commentBody = formatReviewAsComment(review);
-        await postPRComment(prNumber, commentBody);
-        console.log("Review posted as PR comment.");
+        const timeToReviewSeconds = Math.round((Date.now() - startMs) / 1000);
+
+        // --- Log metrics event ---
+        try {
+            log("code-review", "pr_reviewed", {
+                pr_id: String(prNumber),
+                pr_title: meta.title,
+                author: meta.user?.login,
+                created_at: meta.created_at,
+                reviewed_at: new Date().toISOString(),
+                time_to_review_seconds: timeToReviewSeconds,
+                comments_posted: review.comments?.length || 0,
+                review_state: review.comments?.some((c) => c.severity === "critical")
+                    ? "changes_requested"
+                    : "approved",
+            });
+        } catch (err) {
+            console.warn(`Failed to log metrics: ${err.message}`);
+        }
+
+        // --- Output ---
+        console.log(`\n── PR #${prNumber}: ${meta.title}`);
+        console.log(`Summary: ${review.summary}`);
+        console.log(`\nComments (${review.comments?.length || 0}):`);
+
+        for (const comment of review.comments || []) {
+            const icon = comment.severity === "critical" ? "🔴" : comment.severity === "warning" ? "🟡" : "🔵";
+            console.log(`\n${icon} [${comment.severity.toUpperCase()}] ${comment.file}`);
+            console.log(`   Issue: ${comment.issue}`);
+            console.log(`   Fix:   ${comment.suggestion}`);
+        }
+
+        console.log(`\nReview completed in ${timeToReviewSeconds}s`);
+
+        // --- Post to GitHub ---
+        let commentPosted = false;
+        try {
+            const commentBody = formatReviewAsComment(review);
+            await postPRComment(prNumber, commentBody);
+            console.log("Review posted as PR comment.");
+            commentPosted = true;
+        } catch (err) {
+            console.warn(`Could not post comment: ${err.message}`);
+        }
+
+        return {
+            success: true,
+            pr_number: prNumber,
+            pr_title: meta.title,
+            review,
+            time_to_review_seconds: timeToReviewSeconds,
+            metrics_logged: true,
+            comment_posted: commentPosted,
+        };
     } catch (err) {
-        console.warn(`Could not post comment: ${err.message}`);
+        console.error(`Error reviewing PR: ${err.message}`);
+        return {
+            success: false,
+            pr_number: prNumber,
+            error: err.message,
+        };
     }
-
-    return review;
 }
 
 // --- Main ---
@@ -232,13 +265,36 @@ async function run() {
 
     if (!prNumber) {
         console.error("Usage: node code-review-agent.js <PR_NUMBER>");
+        console.error("Required env vars: GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN");
         process.exit(1);
     }
 
-    await reviewPR(parseInt(prNumber));
+    if (!CONFIG.owner || !CONFIG.repo) {
+        console.error("Error: GITHUB_OWNER and GITHUB_REPO env vars are required");
+        process.exit(1);
+    }
+
+    if (!CONFIG.token) {
+        console.error("Error: GITHUB_TOKEN env var is required");
+        process.exit(1);
+    }
+
+    const result = await reviewPR(parseInt(prNumber));
+    
+    // Output JSON for pipeline consumption
+    if (process.env.OUTPUT_JSON === "true") {
+        console.log(JSON.stringify(result));
+    }
+    
+    process.exit(result?.success === false ? 1 : 0);
 }
 
 run().catch((err) => {
     console.error("Error:", err.message);
+    
+    if (process.env.OUTPUT_JSON === "true") {
+        console.log(JSON.stringify({ success: false, error: err.message }));
+    }
+    
     process.exit(1);
 });

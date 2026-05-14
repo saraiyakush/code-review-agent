@@ -3,8 +3,8 @@ const fs = require("fs");
 
 // --- Config ---
 const CONFIG = {
-    owner: "saraiyakush",
-    repo: "code-review-agent",
+    owner: process.env.GITHUB_OWNER,
+    repo: process.env.GITHUB_REPO,
     lookbackDays: 1,
     maxPages: 5,
     outputFile: "baseline.json",
