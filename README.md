@@ -25,7 +25,7 @@ src/
 ├── baseline.js           ✅ Implemented
 ├── code-review-agent.js  ⚠️  In Progress
 ├── metrics-logger.js     ✅ Implemented
-└── reporter.js           ❌ Not implemented
+└── reporter.js           ⚠️ Not implemented
 ```
 
 # Event Flow
