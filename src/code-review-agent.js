@@ -280,7 +280,8 @@ async function run() {
     }
 
     const result = await reviewPR(parseInt(prNumber));
-        
+
+    
     process.exit(result?.success === false ? 1 : 0);
 }
 
