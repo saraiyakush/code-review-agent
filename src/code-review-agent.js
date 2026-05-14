@@ -87,6 +87,61 @@ Format your response as a JSON object with this structure:
 
 Return only valid JSON, no markdown fences.`;
 
+// --- Post Comment to GitHub ---
+function postPRComment(prNumber, body) {
+    return new Promise((resolve, reject) => {
+        const payload = JSON.stringify({ body });
+        const options = {
+            hostname: "api.github.com",
+            path: `/repos/${CONFIG.owner}/${CONFIG.repo}/issues/${prNumber}/comments`,
+            method: "POST",
+            headers: {
+                "User-Agent": "code-review-agent",
+                Accept: "application/vnd.github+json",
+                ...(CONFIG.token && { Authorization: `Bearer ${CONFIG.token}` }),
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(payload),
+            },
+        };
+
+        const req = https.request(options, (res) => {
+            let data = "";
+            res.on("data", (chunk) => (data += chunk));
+            res.on("end", () => {
+                if (res.statusCode === 201) resolve(JSON.parse(data));
+                else reject(new Error(`Failed to post comment: ${res.statusCode} ${data}`));
+            });
+        });
+
+        req.on("error", reject);
+        req.write(payload);
+        req.end();
+    });
+}
+
+function formatReviewAsComment(review) {
+    const iconMap = { critical: "🔴", warning: "🟡", suggestion: "🔵" };
+    const lines = [
+        `## 🤖 Automated Code Review`,
+        ``,
+        `**Summary:** ${review.summary}`,
+        ``,
+        `---`,
+    ];
+
+    for (const comment of review.comments || []) {
+        const icon = iconMap[comment.severity] || "⚪";
+        lines.push(`### ${icon} ${comment.severity.toUpperCase()} — \`${comment.file}\``);
+        lines.push(`**Issue:** ${comment.issue}`);
+        lines.push(`**Suggestion:** ${comment.suggestion}`);
+        lines.push(``);
+    }
+
+    lines.push(`---`);
+    lines.push(`*Posted by code-review-agent using Claude ${CONFIG.model}*`);
+    return lines.join("\n");
+}
+
 // --- Core ---
 async function reviewPR(prNumber) {
     console.log(`\nReviewing PR #${prNumber}...`);
@@ -156,6 +211,16 @@ async function reviewPR(prNumber) {
     }
 
     console.log(`\nReview completed in ${timeToReviewSeconds}s`);
+
+    // --- Post to GitHub ---
+    try {
+        const commentBody = formatReviewAsComment(review);
+        await postPRComment(prNumber, commentBody);
+        console.log("Review posted as PR comment.");
+    } catch (err) {
+        console.warn(`Could not post comment: ${err.message}`);
+    }
+
     return review;
 }
 
