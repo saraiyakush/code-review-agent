@@ -1,5 +1,7 @@
 const Anthropic = require("@anthropic-ai/sdk");
 const https = require("https");
+const fs = require("fs");
+const path = require("path");
 const { log } = require("./metrics-logger");
 
 // --- Config ---
@@ -64,29 +66,10 @@ async function fetchPRMeta(prNumber) {
 }
 
 // --- Review Rules ---
-const REVIEW_PROMPT = `You are a senior code reviewer. Review the following PR diff and provide concise, actionable feedback.
-
-Focus on:
-- Bugs or logic errors
-- Security issues
-- Missing error handling
-- Performance concerns
-- Code clarity
-
-Format your response as a JSON object with this structure:
-{
-  "summary": "One sentence overall assessment",
-  "comments": [
-    {
-      "severity": "critical | warning | suggestion",
-      "file": "filename or 'general'",
-      "issue": "What the problem is",
-      "suggestion": "How to fix it"
-    }
-  ]
-}
-
-Return only valid JSON, no markdown fences.`;
+const REVIEW_PROMPT = fs.readFileSync(
+    path.join(__dirname, "review-prompt.md"),
+    "utf8"
+);
 
 // --- Post Comment to GitHub ---
 function postPRComment(prNumber, body) {
