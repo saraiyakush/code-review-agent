@@ -280,21 +280,12 @@ async function run() {
     }
 
     const result = await reviewPR(parseInt(prNumber));
-    
-    // Output JSON for pipeline consumption
-    if (process.env.OUTPUT_JSON === "true") {
-        console.log(JSON.stringify(result));
-    }
-    
+        
     process.exit(result?.success === false ? 1 : 0);
 }
 
 run().catch((err) => {
     console.error("Error:", err.message);
-    
-    if (process.env.OUTPUT_JSON === "true") {
-        console.log(JSON.stringify({ success: false, error: err.message }));
-    }
-    
+        
     process.exit(1);
 });
