@@ -153,10 +153,11 @@ async function reviewPR(prNumber) {
         const message = await anthropic.messages.create({
             model: CONFIG.model,
             max_tokens: 1024,
+            system: REVIEW_PROMPT,
             messages: [
                 {
                     role: "user",
-                    content: `${REVIEW_PROMPT}\n\nPR Title: ${meta.title}\n\nDiff:\n${truncatedDiff}`,
+                    content: `Review this pull request:\n\nTitle: ${meta.title}\n\nDiff:\n${truncatedDiff}`,
                 },
             ],
         });
