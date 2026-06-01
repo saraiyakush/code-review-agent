@@ -1,22 +1,54 @@
+/**
+ * ============================================================================
+ * CODE REVIEW AGENT - Automated PR Review using Claude AI
+ * ============================================================================
+ * 
+ * This script demonstrates how to use Claude's API to automate code reviews.
+ * 
+ * Flow:
+ * 1. Fetch PR metadata and diff from GitHub
+ * 2. Send diff to Claude with review instructions (prompt)
+ * 3. Parse Claude's structured JSON response
+ * 4. Post review as a comment on the PR
+ */
+
 const Anthropic = require("@anthropic-ai/sdk");
 const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const { log } = require("./metrics-logger");
 
-// --- Config ---
+// ============================================================================
+// SECTION 1: CONFIGURATION
+// ============================================================================
+
 const CONFIG = {
+    // GitHub repository details (from environment variables)
     owner: process.env.GITHUB_OWNER,
     repo: process.env.GITHUB_REPO,
-    model: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
     token: process.env.GITHUB_TOKEN,
+    
+    // Claude API configuration
+    model: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    
+    // Token management: Limit diff size to stay within Claude's context window
+    // Default 12000 chars ≈ 3000 tokens, leaving room for prompt + response
     maxDiffSize: parseInt(process.env.MAX_DIFF_SIZE || "12000")
 };
 
+// Initialize Anthropic client (API key read from ANTHROPIC_API_KEY env var)
 const anthropic = new Anthropic();
 
-// --- GitHub API ---
+// ============================================================================
+// SECTION 2: GITHUB API HELPERS
+// ============================================================================
+// These functions fetch PR data from GitHub's REST API
+
+/**
+ * Generic GET request to GitHub API
+ * Handles authentication and basic error cases
+ */
 function get(url) {
     return new Promise((resolve, reject) => {
         const options = {
@@ -41,12 +73,16 @@ function get(url) {
     });
 }
 
+/**
+ * Fetch PR diff in unified diff format
+ * This is what we'll send to Claude for review
+ */
 async function fetchPRDiff(prNumber) {
     return new Promise((resolve, reject) => {
         const options = {
             headers: {
                 "User-Agent": "code-review-agent",
-                Accept: "application/vnd.github.diff",
+                Accept: "application/vnd.github.diff", // Request diff format, not JSON
                 ...(CONFIG.token && { Authorization: `Bearer ${CONFIG.token}` }),
             },
         };
@@ -60,18 +96,39 @@ async function fetchPRDiff(prNumber) {
     });
 }
 
+/**
+ * Fetch PR metadata (title, author, etc.)
+ */
 async function fetchPRMeta(prNumber) {
     const url = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/pulls/${prNumber}`;
     return get(url);
 }
 
-// --- Review Rules ---
+// ============================================================================
+// SECTION 3: LLM PROMPT ENGINEERING
+// ============================================================================
+
+/**
+ * Load review instructions from external file
+ * 
+ * KEY CONCEPT: System Prompt vs User Prompt
+ * - System prompt: Defines Claude's role, rules, and output format
+ * - User prompt: Contains the actual task/data to process
+ * 
+ * Separating these improves consistency and makes prompt iteration easier
+ */
 const REVIEW_PROMPT = fs.readFileSync(
     path.join(__dirname, "review-prompt.md"),
     "utf8"
 );
 
-// --- Post Comment to GitHub ---
+// ============================================================================
+// SECTION 4: GITHUB COMMENT FORMATTING
+// ============================================================================
+
+/**
+ * Post review comment to GitHub PR
+ */
 function postPRComment(prNumber, body) {
     return new Promise((resolve, reject) => {
         const payload = JSON.stringify({ body });
@@ -103,6 +160,9 @@ function postPRComment(prNumber, body) {
     });
 }
 
+/**
+ * Format Claude's JSON response as a nice markdown comment
+ */
 function formatReviewAsComment(review) {
     const iconMap = { critical: "🔴", warning: "🟡", suggestion: "🔵" };
     const lines = [
@@ -126,13 +186,26 @@ function formatReviewAsComment(review) {
     return lines.join("\n");
 }
 
-// --- Core ---
+// ============================================================================
+// SECTION 5: CORE REVIEW LOGIC (⭐ THE MAIN EVENT)
+// ============================================================================
+
+/**
+ * Main function: Review a PR using Claude AI
+ * 
+ * This is where everything comes together:
+ * 1. Fetch PR data from GitHub
+ * 2. Call Claude's API with the diff
+ * 3. Parse and validate the response
+ * 4. Post the review back to GitHub
+ */
 async function reviewPR(prNumber) {
     console.log(`\nReviewing PR #${prNumber}...`);
     const startedAt = new Date().toISOString();
     const startMs = Date.now();
 
     try {
+        // Step 1: Fetch PR metadata and diff from GitHub
         const [meta, diff] = await Promise.all([
             fetchPRMeta(prNumber),
             fetchPRDiff(prNumber),
@@ -147,13 +220,43 @@ async function reviewPR(prNumber) {
             };
         }
 
-        // Truncate large diffs to stay within token limits
-        const truncatedDiff = diff.length > CONFIG.maxDiffSize ? diff.slice(0, CONFIG.maxDiffSize) + "\n...[truncated]" : diff;
+        // Step 2: Handle token limits
+        // Claude has a context window limit. If the diff is too large, truncate it.
+        // This is a simple strategy - production systems might use smarter chunking.
+        const truncatedDiff = diff.length > CONFIG.maxDiffSize 
+            ? diff.slice(0, CONFIG.maxDiffSize) + "\n...[truncated]" 
+            : diff;
 
+        // ========================================================================
+        // ⭐ STEP 3: CALL CLAUDE'S API (THE KEY PART FOR YOUR DEMO)
+        // ========================================================================
+        
+        /**
+         * KEY CONCEPTS TO EXPLAIN:
+         * 
+         * 1. System Prompt (REVIEW_PROMPT):
+         *    - Defines Claude's role as a code reviewer
+         *    - Sets the rules and priorities
+         *    - Specifies the output format (JSON)
+         *    - Loaded from external file for easy iteration
+         * 
+         * 2. User Prompt:
+         *    - Contains the actual task: "Review this PR"
+         *    - Includes the PR title and diff
+         *    - Kept separate from instructions for clarity
+         * 
+         * 3. Model Selection:
+         *    - claude-sonnet-4-6: Fast, cost-effective, good for code
+         *    - Could use opus for more complex reviews
+         * 
+         * 4. max_tokens:
+         *    - Limits the response length
+         *    - 1024 tokens ≈ 750 words, enough for most reviews
+         */
         const message = await anthropic.messages.create({
             model: CONFIG.model,
             max_tokens: 1024,
-            system: REVIEW_PROMPT,
+            system: REVIEW_PROMPT,  // ← Role and instructions
             messages: [
                 {
                     role: "user",
@@ -162,12 +265,31 @@ async function reviewPR(prNumber) {
             ],
         });
 
+        // Step 4: Extract text from Claude's response
+        // Claude returns an array of content blocks; we want the text block
         const responseText = message.content.find((b) => b.type === "text")?.text || "";
-        let review;
 
+        // ========================================================================
+        // STEP 5: PARSE CLAUDE'S RESPONSE
+        // ========================================================================
+        
+        let review;
         try {
-            // Strip markdown code fences if present
-            const cleanedText = responseText.replace(/^```json\s*\n?/i, "").replace(/\n?```\s*$/i, "");
+            /**
+             * COMMON ISSUE: Claude sometimes wraps JSON in markdown code fences
+             * despite being told not to. We handle this defensively.
+             * 
+             * Example response:
+             * ```json
+             * {"summary": "...", "comments": [...]}
+             * ```
+             * 
+             * We strip the fences before parsing.
+             */
+            const cleanedText = responseText
+                .replace(/^```json\s*\n?/i, "")  // Remove opening fence
+                .replace(/\n?```\s*$/i, "");      // Remove closing fence
+            
             review = JSON.parse(cleanedText);
         } catch {
             console.error("Failed to parse review response:", responseText);
@@ -181,7 +303,7 @@ async function reviewPR(prNumber) {
 
         const timeToReviewSeconds = Math.round((Date.now() - startMs) / 1000);
 
-        // --- Log metrics event ---
+        // Step 6: Log metrics for evaluation (optional, can skip in demo)
         try {
             log("code-review", "pr_reviewed", {
                 pr_id: String(prNumber),
@@ -199,7 +321,7 @@ async function reviewPR(prNumber) {
             console.warn(`Failed to log metrics: ${err.message}`);
         }
 
-        // --- Output ---
+        // Step 7: Display review in console
         console.log(`\n── PR #${prNumber}: ${meta.title}`);
         console.log(`Summary: ${review.summary}`);
         console.log(`\nComments (${review.comments?.length || 0}):`);
@@ -213,7 +335,7 @@ async function reviewPR(prNumber) {
 
         console.log(`\nReview completed in ${timeToReviewSeconds}s`);
 
-        // --- Post to GitHub ---
+        // Step 8: Post review as a comment on the PR
         let commentPosted = false;
         try {
             const commentBody = formatReviewAsComment(review);
@@ -224,6 +346,7 @@ async function reviewPR(prNumber) {
             console.warn(`Could not post comment: ${err.message}`);
         }
 
+        // Return structured result (useful for CI/CD pipelines)
         return {
             success: true,
             pr_number: prNumber,
@@ -243,10 +366,20 @@ async function reviewPR(prNumber) {
     }
 }
 
-// --- Main ---
+// ============================================================================
+// SECTION 6: CLI ENTRY POINT
+// ============================================================================
+
+/**
+ * Main entry point when run from command line
+ * 
+ * Usage:
+ *   GITHUB_OWNER=owner GITHUB_REPO=repo node src/code-review-agent.js 123
+ */
 async function run() {
     const prNumber = process.argv[2];
 
+    // Validate inputs
     if (!prNumber) {
         console.error("Usage: node code-review-agent.js <PR_NUMBER>");
         console.error("Required env vars: GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN");
@@ -263,16 +396,19 @@ async function run() {
         process.exit(1);
     }
 
+    // Run the review
     const result = await reviewPR(parseInt(prNumber));
     
-    // Output JSON for pipeline consumption
+    // Support JSON output for CI/CD pipelines
     if (process.env.OUTPUT_JSON === "true") {
         console.log(JSON.stringify(result));
     }
     
+    // Exit with appropriate code for automation
     process.exit(result?.success === false ? 1 : 0);
 }
 
+// Handle uncaught errors gracefully
 run().catch((err) => {
     console.error("Error:", err.message);
     
