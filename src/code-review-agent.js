@@ -177,6 +177,7 @@ function formatReviewAsComment(review) {
         const icon = iconMap[comment.severity] || "⚪";
         lines.push(`### ${icon} ${comment.severity.toUpperCase()} — \`${comment.file}\``);
         lines.push(`**Issue:** ${comment.issue}`);
+        lines.push(``);
         lines.push(`**Suggestion:** ${comment.suggestion}`);
         lines.push(``);
     }
@@ -256,11 +257,10 @@ async function reviewPR(prNumber) {
         const message = await anthropic.messages.create({
             model: CONFIG.model,
             max_tokens: 1024,
-            system: REVIEW_PROMPT,  // ← Role and instructions
             messages: [
                 {
                     role: "user",
-                    content: `Review this pull request:\n\nTitle: ${meta.title}\n\nDiff:\n${truncatedDiff}`,
+                    content: `${REVIEW_PROMPT} Review this pull request:\n\nTitle: ${meta.title}\n\nDiff:\n${truncatedDiff}`,
                 },
             ],
         });
