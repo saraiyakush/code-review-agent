@@ -164,7 +164,7 @@ function postPRComment(prNumber, body) {
  * Format Claude's JSON response as a nice markdown comment
  */
 function formatReviewAsComment(review) {
-    const iconMap = { critical: "🔴", warning: "🟡", suggestion: "🔵" };
+    const iconMap = { critical: "🔴", warning: "🟡", suggestion: "🔵", praise: "🟢" };
     const lines = [
         `## 🤖 Automated Code Review`,
         ``,
@@ -327,7 +327,10 @@ async function reviewPR(prNumber) {
         console.log(`\nComments (${review.comments?.length || 0}):`);
 
         for (const comment of review.comments || []) {
-            const icon = comment.severity === "critical" ? "🔴" : comment.severity === "warning" ? "🟡" : "🔵";
+            const icon = comment.severity === "critical" ? "🔴" 
+                       : comment.severity === "warning" ? "🟡" 
+                       : comment.severity === "praise" ? "🟢"
+                       : "🔵";
             console.log(`\n${icon} [${comment.severity.toUpperCase()}] ${comment.file}`);
             console.log(`   Issue: ${comment.issue}`);
             console.log(`   Fix:   ${comment.suggestion}`);
