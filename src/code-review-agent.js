@@ -402,10 +402,6 @@ async function run() {
     // Run the review
     const result = await reviewPR(parseInt(prNumber));
     
-    // Support JSON output for CI/CD pipelines
-    if (process.env.OUTPUT_JSON === "true") {
-        console.log(JSON.stringify(result));
-    }
     
     // Exit with appropriate code for automation
     process.exit(result?.success === false ? 1 : 0);
